@@ -1,13 +1,10 @@
 from .main import (
-    JsonRpcPeer,
+    JsonRpcConnection,
+    JsonRpcConnectionType,
     open_jsonrpc_memory,
     serve_jsonrpc_memory,
     open_jsonrpc_ws,
-    serve_jsonrpc_ws,
 )
-
-from .dispatch import Dispatch
-
 from sansio_jsonrpc import (
     JsonRpcApplicationError,
     JsonRpcError,
@@ -19,3 +16,4 @@ from sansio_jsonrpc import (
     JsonRpcReservedError,
     JsonRpcParseError,
 )
+from .dispatch import Dispatch

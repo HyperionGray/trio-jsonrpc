@@ -2,7 +2,7 @@
 
 This project provides an implementation of [JSON-RPC v
 2.0](https://www.jsonrpc.org/specification) based on
-`[sansio-jsonrpc](https://github.com/hyperiongray/sansio-jsonrpc)` with all of the I/O
+[sansio-jsonrpc](https://github.com/hyperiongray/sansio-jsonrpc) with all of the I/O
 implemented using the [Trio asynchronous framework](https://trio.readthedocs.io).
 
 ## Client Example
@@ -12,17 +12,20 @@ The following example shows a basic JSON-RPC client.
 ```python
 from trio_jsonrpc import open_jsonrpc_ws, JsonRpcException
 
-async with open_jsonrpc_ws('ws://example.com/') as client:
-    try:
-        resp = await client.request(
-            method='open_vault_door',
-            {'employee': 'Mark', 'pin': 1234}
-        )
-        print(resp.result)
+async def main():
+    async with open_jsonrpc_ws('ws://example.com/') as client:
+        try:
+            resp = await client.request(
+                method='open_vault_door',
+                {'employee': 'Mark', 'pin': 1234}
+            )
+            print(resp.result)
 
-        await client.notify(method='hello_world')
-    except JsonRpcException as jre:
-        print('RPC failed:', jre)
+            await client.notify(method='hello_world')
+        except JsonRpcException as jre:
+            print('RPC failed:', jre)
+
+trio.run(main)
 ```
 
 The example begins by opening a JSON-RPC connection using a WebSocket transport. The
@@ -51,52 +54,84 @@ not expect or wait for a response.
 
 ## Server Example
 
-The following example shows a basic JSON-RPC server.
+The following example shows a basic JSON-RPC server. The server is more DIY (do it
+yourself) than the client because a server has to incorporate several disparate
+functionalities:
+
+1. Setting up the transport, especially if the transport requires a handshake as
+   WebSocket does.
+2. Handling new connections to the server.
+3. Multiplexing requests on a single connection.
+4. Dispatching a request to an appropriate handler.
+5. Managing connection state over the course of multiple requests. (I.e. allowing one
+   handler to indicate that the connection is authorized, so other handlers can use that
+   authorization information to make access control decisions.)
+6. Possibly logging information about each request.
+
+This library cannot feasibly implement a default solution that handles the
+aforementioned items in a way that satsifies every downstream project. Instead, the
+library gives you the pieces you need to build a server.
 
 ```python
-from trio_jsonrpc import serve_jsonrpc_ws, JsonRpcException, JsonRpcMethodNotFoundException
-
-async with serve_jsonrpc_ws('ws://example.com/') as server:
-    async for request in server.listen():
-        if request.method == 'open_vault_door':
-            await server.respond_with_result({"door_status": "open"})
-        else:
-            await server.respond_with_error({})
-```
-
-The server looks similar to the client, except it uses a different method to set up the
-context manager. Inside the context manager, we enter a loop that gets each request as
-it comes in. From there we can handle the request or send back an error to the client.
-
-This example is pretty simplistic and contains some limitations. For example, the server
-can only respond to one request at a time. If it takes a while to complete a request,
-all of the requests received after it will be blocked. Also, the approach for checking
-the requested method name won't scale well to large projects.
-
-The next example introduces a new abstraction that solves both of these issues.
-
-```python
+from dataclasses import dataclass
 import trio
-from trio_jsonrpc import Dispatch, serve_jsonrpc_ws, JsonRpcException
+from trio_jsonrpc import Dispatch, JsonRpcApplicationError
+import trio_websocket
 
-app_dispatch = Dispatch()
+@dataclass
+class RequestContext:
+    """ A sample implementation for request context. """
+    db: typing.Any = None
+    authorized_employee: str = None
 
-@app_dispatch.handler
-async def open_vault_door():
-    return {"door_status": "open"}
+dispatch = Dispatch()
 
-async with serve_jsonrpc_ws('ws://example.com/') as server:
-    async with trio.open_nursery() as nursery:
-        async for request in server.listen():
-            nursery.start_soon(app_dispatch.dispatch, server, request)
+@dispatch.handler
+async def open_vault_door(context, employee, pin):
+    access = await context.db.check_pin(employee, pin)
+    if access:
+        context.authorized_employee = employee
+        return {"door_open": True}
+    else:
+        context.authorized_employee = None
+        raise JsonRpcApplicationError(code=-1, message="Not authorized.")
+
+@dispatch.handler
+async def close_vault_door(context):
+    context.authorized_employee = None
+    return {"door_open": False}
+
+async def main():
+    db = ...
+    base_context = RequestContext(db=db)
+
+    async def responder(conn, recv_channel):
+        async for result in recv_channel:
+            if
+
+    async def connection_handler(ws_request):
+        ws = await ws_request.accept()
+        transport = WebSocketTransport(ws)
+        rpc_conn = JsonRpcConnection(transport, JsonRpcConnectionType.SERVER)
+        conn_context = copy(base_context)
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(rpc_conn._background_task)
+            async for request in rpc_conn.iter_requests():
+                nursery.start_soon(dispatch, request, conn_context)
+            nursery.cancel_scope.cancel()
+
+    await trio_websocket.serve_websocket(connection_handler, 'localhost', 8000, None)
+
+trio.run(main)
 ```
 
-The first change here is that we've moved the handler code into a separate function. We
-have also instantiated a `Dispatch` object. The dispatch object is used to map a
-JSON-RPC method name to a Python handler function by decorating each handler function.
+This example defines a `RequestContext` class which is used to share state between
+requests on the same connection. Next, a `Dispatch` object is created, which is used to
+map JSON-RPC methods to Python functions. The `@dispatch.handler` decorator
+automatically registers a Python function as a JSON-RPC method of the same name. Each
+of these handlers takes a `context` object as well as the parameters included in the
+JSON-RPC request. The use of the dispatch and/or context systems are entirely optional.
 
-The other change is that inside the server we are creating a new nursery. Each time we
-get a request, we spawn a new task to handle it so that the main task can go back to
-listening for new reqests. The dispatch object takes care of figuring out which handler
-to call, passing in the correct arguments, and converting the return value (or raised
-exception) into an appropriate JSON-RPC response.
+In `main()`, we set up a new WebSocket server. For each new connection, we complete the
+WebSocket handshake and then wrap the connection in a `JsonRpcConnection`. Finally, we
+iterate over the incoming JSON-RPC requsts and dispatch each one inside a new task.

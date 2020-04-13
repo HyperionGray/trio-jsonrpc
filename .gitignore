@@ -3,4 +3,6 @@
 .mypy_cache
 .vscode
 __pycache__
+dist
 poetry.lock
+TODO.md

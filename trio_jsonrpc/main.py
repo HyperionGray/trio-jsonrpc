@@ -8,7 +8,7 @@ import typing
 from sansio_jsonrpc import (
     JsonRpcException,
     JsonRpcInternalError,
-    JsonRpcPeer as SansIoPeer,
+    JsonRpcPeer,
     JsonRpcRequest,
     JsonRpcResponse,
 )
@@ -23,7 +23,7 @@ from .transport.ws import WebSocketTransport
 logger = logging.getLogger("trio_jsonrpc")
 
 
-class JsonRpcPeerType(enum.Enum):
+class JsonRpcConnectionType(enum.Enum):
     """
     An enumeration that identifies whether the peer is a client role or a server role.
     """
@@ -32,14 +32,14 @@ class JsonRpcPeerType(enum.Enum):
     SERVER = 1
 
 
-class JsonRpcPeer:
+class JsonRpcConnection:
     """ A JSON-RPC client. """
 
     def __init__(self, transport, peer_type):
         """ Constructor. """
         self._transport = transport
         self._peer_type = peer_type
-        self._sansio_peer = SansIoPeer()
+        self._sansio_peer = JsonRpcPeer()
         self._bg_task_running = False
         self._outbound_requests = dict()
         irsend, irrecv = trio.open_memory_channel(0)
@@ -49,12 +49,12 @@ class JsonRpcPeer:
     @property
     def is_server(self):
         """ Returns True if this peer is in the server role. """
-        return self._peer_type == JsonRpcPeerType.SERVER
+        return self._peer_type == JsonRpcConnectionType.SERVER
 
     @property
     def is_client(self):
         """ Returns True if this peer is in the client role. """
-        return self._peer_type == JsonRpcPeerType.CLIENT
+        return self._peer_type == JsonRpcConnectionType.CLIENT
 
     async def request(
         self, method: str, params: typing.Union[dict, list] = None
@@ -148,9 +148,12 @@ class JsonRpcPeer:
             except TransportClosed:
                 # If the transport is closed on the receive side, we need to exit the
                 # loop.
-                logger.error(
+                logger.info(
                     "Background task is exiting because the receive transport is closed."
                 )
+                # We also close our requests channel so that any callers inside
+                # `iter_requests()` will move on.
+                await self._inbound_requests_send.aclose()
                 break
             except Exception:
                 # An uncaught exception shouldn't crash the background task, but we also
@@ -161,7 +164,6 @@ class JsonRpcPeer:
 
     async def _background_send_error(self, exc, request=None):
         try:
-            print(repr(exc))
             bytes_to_send = self._sansio_peer.respond_with_error(
                 request, exc.get_error()
             )
@@ -175,22 +177,24 @@ class JsonRpcPeer:
             )
 
 
-def jsonrpc_client(transport: BaseTransport, nursery: trio.Nursery,) -> JsonRpcPeer:
+def jsonrpc_client(
+    transport: BaseTransport, nursery: trio.Nursery,
+) -> JsonRpcConnection:
     """ Create a JSON-RPC peer instance using the specified transport. """
-    peer = JsonRpcPeer(transport, JsonRpcPeerType.CLIENT)
+    peer = JsonRpcConnection(transport, JsonRpcConnectionType.CLIENT)
     nursery.start_soon(peer._background_task)
     return peer
 
 
 def jsonrpc_server(
     transport: BaseTransport, nursery: trio.Nursery, request_buffer_len: int = 1,
-) -> JsonRpcPeer:
+) -> JsonRpcConnection:
     """ Create a JSON-RPC peer instance using the specified transport. """
     request_buffer_send, request_buffer_recv = trio.open_memory_channel(
         request_buffer_len
     )
 
-    peer = JsonRpcPeer(transport, JsonRpcPeerType.SERVER)
+    peer = JsonRpcConnection(transport, JsonRpcConnectionType.SERVER)
     nursery.start_soon(peer._background_task)
     return peer
 
@@ -198,7 +202,7 @@ def jsonrpc_server(
 @asynccontextmanager
 async def open_jsonrpc_memory(
     send_channel: trio.abc.SendChannel, recv_channel: trio.abc.ReceiveChannel,
-) -> typing.AsyncIterator[JsonRpcPeer]:
+) -> typing.AsyncIterator[JsonRpcConnection]:
     """
     Open a JSON-RPC connection using Trio channels as transport.
 
@@ -213,9 +217,7 @@ async def open_jsonrpc_memory(
 
 @asynccontextmanager
 async def serve_jsonrpc_memory(
-    send_channel: trio.abc.SendChannel,
-    recv_channel: trio.abc.ReceiveChannel,
-    task_status=trio.TASK_STATUS_IGNORED,
+    send_channel: trio.abc.SendChannel, recv_channel: trio.abc.ReceiveChannel,
 ):
     """
     Serve a JSON-RPC connection using Trio channels as transport.
@@ -226,26 +228,15 @@ async def serve_jsonrpc_memory(
     """
     async with trio.open_nursery() as nursery:
         transport = MemoryTransport(send_channel, recv_channel)
-        task_status.started()
         yield jsonrpc_server(transport, nursery)
         nursery.cancel_scope.cancel()
 
 
 @asynccontextmanager
-async def open_jsonrpc_ws(url: str) -> typing.AsyncIterator[JsonRpcPeer]:
+async def open_jsonrpc_ws(url: str) -> typing.AsyncIterator[JsonRpcConnection]:
     """ Open a JSON-RPC connection using WebSocket transport. """
     async with trio_websocket.open_websocket_url(url) as ws:
         async with trio.open_nursery() as nursery:
             transport = WebSocketTransport(ws)
             yield jsonrpc_client(transport, nursery)
             nursery.cancel_scope.cancel()
-
-
-async def serve_jsonrpc_ws(
-    host: str,
-    port: int,
-    ssl_context: ssl.SSLContext,
-    task_status=trio.TASK_STATUS_IGNORED,
-):
-    """ Serve JSON-RPC over a WebSocket. """
-    pass

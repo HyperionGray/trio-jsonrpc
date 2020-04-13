@@ -1,8 +1,8 @@
 check: mypy test
 
 mypy:
-	mypy trio_jsonrpc/
+	poetry run mypy trio_jsonrpc/
 
 test:
-	pytest --cov=trio_jsonrpc/ tests/
-	coverage report -m
+	poetry run pytest --cov=trio_jsonrpc/ tests/
+	poetry run coverage report -m
