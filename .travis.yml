@@ -1,0 +1,19 @@
+language: python
+dist: xenial
+
+git:
+  depth: 1
+
+matrix:
+  include:
+    - python: 3.7
+
+install:
+  - pip install poetry
+  - poetry install
+
+script:
+  - poetry run make check
+
+after_success:
+  - poetry run make coverage
