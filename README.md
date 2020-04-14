@@ -4,7 +4,7 @@
 ![Python Versions](https://img.shields.io/pypi/pyversions/trio-jsonrpc.svg?style=flat-square)
 ![MIT License](https://img.shields.io/github/license/HyperionGray/trio-jsonrpc.svg?style=flat-square)
 [![Build Status](https://img.shields.io/travis/com/HyperionGray/trio-jsonrpc.svg?style=flat-square&branch=master)](https://travis-ci.com/HyperionGray/trio-jsonrpc)
-[![Coverage](https://img.shields.io/coveralls/github/HyperionGray/trio-jsonrpc.svg?style=flat-square)](https://coveralls.io/github/HyperionGray/trio-jsonrpc?branch=master)
+[![codecov](https://codecov.io/gh/HyperionGray/trio-jsonrpc/branch/master/graph/badge.svg)](https://codecov.io/gh/HyperionGray/trio-jsonrpc)
 
 This project provides an implementation of [JSON-RPC v
 2.0](https://www.jsonrpc.org/specification) based on
