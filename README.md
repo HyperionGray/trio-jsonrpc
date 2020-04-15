@@ -21,11 +21,11 @@ from trio_jsonrpc import open_jsonrpc_ws, JsonRpcException
 async def main():
     async with open_jsonrpc_ws('ws://example.com/') as client:
         try:
-            resp = await client.request(
+            result = await client.request(
                 method='open_vault_door',
                 {'employee': 'Mark', 'pin': 1234}
             )
-            print(resp.result)
+            print('vault open:', result['vault_open'])
 
             await client.notify(method='hello_world')
         except JsonRpcException as jre:
@@ -49,11 +49,11 @@ ready when entering the block and automatically closes the connection when leavi
 block.
 
 Within the block, we call the client's `request(...)` method to send a JSON-RPC request.
-This method sends the request to the server, waits for a response, and returns a
-`JsonRpcResponse` object. If the server indicates that an error occurred, a
-`JsonRpcException` will be raised instead. The client multiplexes requests so that it
-can be use concurrently from multiple tasks; responses are routed back to the
-appropriate task that called `request(...)`.
+This method sends the request to the server, waits for a response, and returns a result.
+If the server indicates that an error occurred, a `JsonRpcException` will be raised
+instead. The client multiplexes requests so that it can be use concurrently from
+multiple tasks; responses are routed back to the appropriate task that called
+`request(...)`.
 
 The client also has a `notify(...)` method which sends a request to the server but does
 not expect or wait for a response.
@@ -111,7 +111,7 @@ async def open_vault_door(employee, pin):
     access = await dispatch.ctx.db.check_pin(employee, pin)
     if access:
         dispatch.ctx.authorized_employee = employee
-        return {"door_open": True}
+        return {"vault_open": True}
     else:
         dispatch.ctx.authorized_employee = None
         raise JsonRpcApplicationError(code=-1, message="Not authorized.")
@@ -119,7 +119,7 @@ async def open_vault_door(employee, pin):
 @dispatch.handler
 async def close_vault_door():
     dispatch.ctx.authorized_employee = None
-    return {"door_open": False}
+    return {"vault_open": False}
 ```
 
 In this section, we define two JSON-RPC methods. Each one is annotated with
