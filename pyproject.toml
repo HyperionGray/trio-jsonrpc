@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "trio-jsonrpc"
-version = "0.1.0"
+version = "0.3.0"
 description = "JSON-RPC v2.0 for Trio"
 authors = ["Mark E. Haase <mehaase@gmail.com>"]
 license = "MIT"
