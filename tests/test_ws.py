@@ -4,12 +4,14 @@ test against. For the WebSocket transport we just want to make sure that basic s
 receiving, and closing features work correctly.
 """
 from functools import partial
+import json
 import logging
 
 import pytest
 import trio
 from trio_jsonrpc import Dispatch, JsonRpcConnection, JsonRpcException, open_jsonrpc_ws
 from trio_jsonrpc.main import JsonRpcConnectionType
+from trio_jsonrpc.transport import TransportClosed
 from trio_jsonrpc.transport.ws import WebSocketTransport
 import trio_websocket
 
@@ -68,7 +70,7 @@ async def test_websocket_roundtrip(nursery):
             logging.info("Serving requests on new connection...")
             async for request in rpc_conn.iter_requests():
                 print(request)
-                conn_nursery.start_soon(dispatch.execute, request, result_send)
+                conn_nursery.start_soon(dispatch.handle_request, request, result_send)
             conn_nursery.cancel_scope.cancel()
 
     server = await nursery.start(
@@ -85,3 +87,55 @@ async def test_websocket_roundtrip(nursery):
         client_nursery.start_soon(client, 5)
 
     assert client_count == 5
+
+
+@fail_after(1)
+async def test_client_closed(nursery):
+    """
+    If the client has already closed its connection when the server tries to send a
+    response, then the server should raise TransportClosed.
+
+    A trio sequencer is used to ensure that the client is actually closed before the
+    server tries to send.
+    """
+    client_count = 0
+    seq = trio.testing.Sequencer()
+
+    async def client(n):
+        nonlocal client_count
+        url = f"ws://localhost:{server_port}"
+        logging.info("Client #%d: Connecting to %s", n, url)
+        client_conn = await trio_websocket.connect_websocket_url(nursery, url)
+        msg = json.dumps({"id": 0, "method": "hello_world", "jsonrpc": "2.0"})
+        logging.info("Client sending request")
+        async with seq(0):
+            await client_conn.send_message(msg.encode("ascii"))
+            await client_conn.aclose()
+        logging.info("Client closed")
+        client_count += 1
+
+    async def connection_handler(ws_request):
+        ws = await ws_request.accept()
+        transport = WebSocketTransport(ws)
+        rpc_conn = JsonRpcConnection(transport, JsonRpcConnectionType.SERVER)
+        async with trio.open_nursery() as conn_nursery:
+            conn_nursery.start_soon(rpc_conn._background_task)
+            logging.info("Serving requests on new connection...")
+            async for request in rpc_conn.iter_requests():
+                with pytest.raises(TransportClosed):
+                    async with seq(1):
+                        logging.info("Responding to request")
+                        await rpc_conn.respond_with_result(request, True)
+                        logging.info("Response sent")
+            conn_nursery.cancel_scope.cancel()
+
+    server = await nursery.start(
+        trio_websocket.serve_websocket, connection_handler, "localhost", 0, None
+    )
+    server_port = server.port
+    logging.info("Server is listening on port %d", server_port)
+
+    async with trio.open_nursery() as client_nursery:
+        client_nursery.start_soon(client, 1)
+
+    assert client_count == 1

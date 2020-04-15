@@ -4,8 +4,10 @@ server to specific handler functions. Use of this module is completely optional,
 is entirely possible to dispatch JSON-RPC methods yourself by directly calling the
 server's ``iter_requests()`` method.
 """
-from copy import copy
+from contextlib import asynccontextmanager
+import contextvars
 from functools import partial
+from itertools import count
 import logging
 import types
 import typing
@@ -19,8 +21,13 @@ from trio_jsonrpc import (
     JsonRpcMethodNotFoundError,
 )
 
+# A sentinel value indicating that a connection context has not been set.
+ContextNotSet = type("ContextNotSet", (object,), dict())()
 
 logger = logging.getLogger(__name__)
+contexts: typing.Dict[int, typing.Any] = dict()
+connection_id = contextvars.ContextVar("connection_id", default=ContextNotSet)
+connection_id_gen = count()
 
 
 class Dispatch:
@@ -39,6 +46,30 @@ class Dispatch:
         """
         self._handlers = dict()
 
+    @property
+    def ctx(self) -> typing.Any:
+        """ Get the connection context for the current task. """
+        id_ = connection_id.get()
+        if id_ is ContextNotSet:
+            raise RuntimeError(
+                "The .context property is only valid in a connection context."
+            )
+        return contexts[id_]
+
+    @asynccontextmanager
+    async def connection_context(self, context):
+        """ Set the connection context for the current task and all child tasks. """
+        if connection_id.get() is not ContextNotSet:
+            raise RuntimeError("The context has already been set.")
+        id_ = next(connection_id_gen)
+        token = connection_id.set(id_)
+        contexts[id_] = context
+        try:
+            yield
+        finally:
+            connection_id.reset(token)
+            del contexts[id_]
+
     def handler(self, fn):
         """
         A decorator that registers an async function as a handler.
@@ -53,44 +84,50 @@ class Dispatch:
             )
         self._handlers[name] = fn
 
-    async def execute(
-        self,
-        request: JsonRpcRequest,
-        result_channel: trio.MemorySendChannel,
-        context: typing.Any = None,
-    ) -> typing.Any:
+    async def execute(self, request: JsonRpcRequest) -> typing.Any:
+        """
+        A helper for running a single JSON-RPC command and getting the result.
+
+        This is mainly helpful for testing, since it returns the result directly rather
+        than via channel.
+
+        :param request:
+        :returns: The result of the command.
+        :raises: JsonRpcException if the command returned an error.
+        """
+        send_channel, recv_channel = trio.open_memory_channel(1)
+        await self.handle_request(request, send_channel)
+        _, result = await recv_channel.receive()
+        print("execute", result)
+        if isinstance(result, JsonRpcException):
+            raise result
+        return result
+
+    async def handle_request(
+        self, request: JsonRpcRequest, result_channel: trio.MemorySendChannel,
+    ) -> None:
         """
         Dispatch a JSON-RPC request and send its result to the given channel.
 
         :param request:
         :param result_channel:
-        :param context:
+        :returns: The outcome of executing the JSON-RPC method, either a result or an
+            error.
         """
         try:
             handler = self._get_handler(request.method)
             params = request.params
-            if context is None:
-                if isinstance(params, list):
-                    fn = partial(handler, *params)
-                elif isinstance(params, dict):
-                    fn = partial(handler, **params)
-                else:
-                    fn = handler
+            if isinstance(params, list):
+                result = await handler(*params)
+            elif isinstance(params, dict):
+                result = await handler(**params)
             else:
-                if isinstance(params, list):
-                    fn = partial(handler, context, *params)
-                elif isinstance(params, dict):
-                    fn = partial(handler, context, **params)
-                else:
-                    fn = partial(handler, context)
-            result = await fn()
+                result = await handler()
         except JsonRpcException as jre:
             result = jre
         except Exception as exc:
             logger.exception(
-                'An unhandled exception occurred in handler "%s" context=%r',
-                handler.__name__,
-                context,
+                'An unhandled exception occurred in handler "%s"', handler.__name__,
             )
             result = JsonRpcInternalError("An unhandled exception occurred.")
         await result_channel.send((request, result))

@@ -72,11 +72,13 @@ functionalities:
 5. Managing connection state over the course of multiple requests. (I.e. allowing one
    handler to indicate that the connection is authorized, so other handlers can use that
    authorization information to make access control decisions.)
-6. Possibly logging information about each request.
+6. Applying pre-handler or post-handler logic to each request, for example logging
+   each request before it is dispatched.
 
 This library cannot feasibly implement a default solution that handles the
 aforementioned items in a way that satsifies every downstream project. Instead, the
-library gives you the pieces you need to build a server.
+library gives you the pieces you need to build a server. We will go through each piece
+one at a time.
 
 ```python
 from dataclasses import dataclass
@@ -85,45 +87,79 @@ from trio_jsonrpc import Dispatch, JsonRpcApplicationError
 import trio_websocket
 
 @dataclass
-class RequestContext:
+class ConnectionContext:
     """ A sample implementation for request context. """
     db: typing.Any = None
     authorized_employee: str = None
 
 dispatch = Dispatch()
+```
 
+In this first piece, we import a few things we need. We also define a
+`ConnectionContext` class. The purpose of this class is to share mutable connection
+state between different handlers on the same connection. For example, we can have one
+handler that authenticates a user and then sets authorization data in the connection
+context. Later, another handler can check that authorization data to make access control
+decisions.
+
+You are free to pass any object as a connection context, as long as it can be copied
+with `copy.copy()`. A dataclass is often convenient for this purpose.
+
+```python
 @dispatch.handler
-async def open_vault_door(context, employee, pin):
-    access = await context.db.check_pin(employee, pin)
+async def open_vault_door(employee, pin):
+    access = await dispatch.ctx.db.check_pin(employee, pin)
     if access:
-        context.authorized_employee = employee
+        dispatch.ctx.authorized_employee = employee
         return {"door_open": True}
     else:
-        context.authorized_employee = None
+        dispatch.ctx.authorized_employee = None
         raise JsonRpcApplicationError(code=-1, message="Not authorized.")
 
 @dispatch.handler
-async def close_vault_door(context):
-    context.authorized_employee = None
+async def close_vault_door():
+    dispatch.ctx.authorized_employee = None
     return {"door_open": False}
+```
 
+In this section, we define two JSON-RPC methods. Each one is annotated with
+`@dispatch.handler`, which means when we dispatch an incoming request, it will look up
+the Python function that matches the JSON-RPC method name. The JSON-RPC parameters are
+passed as arguments to the handler function.
+
+Each handler can access the connection context as `dispatch.ctx`.
+
+Also note that if a handler needs to signal an error, it can raise
+`JsonRpcApplicationError` (or any subclass of it). The dispatcher will automatically
+convert the exception into a JSON-RPC error to send back to the client. If a handler
+raises any exception that is not a subclass of `JsonRpcException`—i.e. if your handler
+is buggy and raises something like `KeyError`—then a generic `JsonRpcInternalError` is
+sent back to the client, and the entire exception is logged.
+
+```
 async def main():
     db = ...
-    base_context = RequestContext(db=db)
+    base_context = ConnectionContext(db=db)
 
     async def responder(conn, recv_channel):
         async for result in recv_channel:
-            if
+            if isinstance(result, JsonRpcException):
+                await conn.respond_with_error(result.get_error())
+            else:
+                await conn.respond_with_result(result)
 
     async def connection_handler(ws_request):
         ws = await ws_request.accept()
         transport = WebSocketTransport(ws)
         rpc_conn = JsonRpcConnection(transport, JsonRpcConnectionType.SERVER)
         conn_context = copy(base_context)
+        result_send, result_recv = trio.open_memory_channel(10)
         async with trio.open_nursery() as nursery:
+            nursery.start_soon(responder, result_recv)
             nursery.start_soon(rpc_conn._background_task)
-            async for request in rpc_conn.iter_requests():
-                nursery.start_soon(dispatch, request, conn_context)
+            async with dispatch.connection_context(conn_context):
+                async for request in rpc_conn.iter_requests():
+                    nursery.start_soon(dispatch.handle_request, request, result_send)
             nursery.cancel_scope.cancel()
 
     await trio_websocket.serve_websocket(connection_handler, 'localhost', 8000, None)
@@ -131,13 +167,19 @@ async def main():
 trio.run(main)
 ```
 
-This example defines a `RequestContext` class which is used to share state between
-requests on the same connection. Next, a `Dispatch` object is created, which is used to
-map JSON-RPC methods to Python functions. The `@dispatch.handler` decorator
-automatically registers a Python function as a JSON-RPC method of the same name. Each
-of these handlers takes a `context` object as well as the parameters included in the
-JSON-RPC request. The use of the dispatch and/or context systems are entirely optional.
+The final section has a lot going on. First of all, we set up a base connection context.
+This base object is used as a blueprint: for each new connection, the context is copied
+and then set as the context for that connection. As long as that connection stays alive,
+all handlers will share that same context object.
 
-In `main()`, we set up a new WebSocket server. For each new connection, we complete the
-WebSocket handshake and then wrap the connection in a `JsonRpcConnection`. Finally, we
-iterate over the incoming JSON-RPC requsts and dispatch each one inside a new task.
+At the end of `main()`, the server is started by calling
+`trio_websocket.serve_websocket()`. For each new connection, the
+`connection_handler(...)` is called. This function finishes the WebSocket handshake and
+then wraps the WebSocket connection into a JSON-RPC connection. Then it iterates over
+the incoming requests and uses the dispatcher to handle each one.
+
+Since each JSON-RPC request is dispatched in a new task, it isn't possible to directly
+`await` the result of each task. Instead, we create a Trio channel and pass it into the
+dispatcher. When the handler finishes, its result will be written to this channel. We
+use a background task called `responder(...)` to read from this channel and actually
+send the response to the client.
