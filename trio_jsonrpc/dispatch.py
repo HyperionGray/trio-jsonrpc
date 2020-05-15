@@ -115,7 +115,7 @@ class Dispatch:
             error.
         """
         try:
-            handler = self._get_handler(request.method)
+            handler = self.get_handler(request.method)
             params = request.params
             if isinstance(params, list):
                 result = await handler(*params)
@@ -132,7 +132,7 @@ class Dispatch:
             result = JsonRpcInternalError("An unhandled exception occurred.")
         await result_channel.send((request, result))
 
-    def _get_handler(self, method: str):
+    def get_handler(self, method: str):
         """ Find the handler function for a given JSON-RPC method name. """
         try:
             return self._handlers[method]
