@@ -4,5 +4,6 @@
 .vscode
 __pycache__
 dist
+docs/_build
 poetry.lock
 TODO.md

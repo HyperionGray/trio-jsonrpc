@@ -157,7 +157,7 @@ class TrioJsonRpcMethod(ObjectDescription):
                 "str": "string",
             }[annotation]
         else:
-            raise NotImplementedError()
+            return "foo"  # raise NotImplementedError()
 
 
 class TrioJsonRpcType(SphinxDirective):
@@ -170,7 +170,7 @@ class TrioJsonRpcType(SphinxDirective):
 
 class TrioJsonRpcIndex(Index):
     name = "index"
-    localname = "Trio JSON-RPC Index"
+    localname = "JSON-RPC API Index"
     shortname = "Index"
 
     def generate(self, docnames=None):
