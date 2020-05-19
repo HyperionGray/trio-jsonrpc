@@ -1,0 +1,2 @@
+[run]
+omit = trio_jsonrpc/sphinx_ext.py

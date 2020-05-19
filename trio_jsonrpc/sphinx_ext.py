@@ -1,3 +1,4 @@
+# type: ignore
 """
 This module defines a Sphinx extension for Trio JSON-RPC methods and objects.
 """
@@ -7,6 +8,8 @@ from enum import Enum
 from importlib import import_module
 from inspect import Parameter, signature, Signature
 import logging
+import re
+from textwrap import dedent
 import typing
 
 from docutils.statemachine import StringList
@@ -14,9 +17,9 @@ from sphinx import addnodes
 from sphinx.directives import ObjectDescription, SphinxDirective
 from sphinx.domains import Domain, Index
 from sphinx.roles import XRefRole
+from sphinx.util.docfields import Field, GroupedField, TypedField
 from sphinx.util.docstrings import prepare_docstring
-from sphinx.util.docutils import nodes
-
+from sphinx.util.docutils import nodes, switch_source_input
 
 if typing.TYPE_CHECKING:
     from sphinx.application import Sphinx
@@ -24,6 +27,7 @@ if typing.TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+PARAM_RE = re.compile(r":param ([^:]+):(.*)")
 
 
 def load_dispatch(location: str) -> Dispatch:
@@ -46,7 +50,7 @@ def load_dispatch(location: str) -> Dispatch:
         )
 
 
-class TrioJsonRpcDispatch(SphinxDirective):
+class JsonRpcDispatch(SphinxDirective):
     """
     This directive defines how to load the Dispatch object. The object is stored in the
     Sphinx environment.
@@ -55,80 +59,136 @@ class TrioJsonRpcDispatch(SphinxDirective):
     required_arguments = 1
 
     def run(self) -> typing.List[nodes.Node]:
-        self.env.trio_jsonrpc_dispatch = self.arguments[0]
+        self.env.jsonrpc_dispatch = self.arguments[0]
         return []
 
 
-class TrioJsonRpcMethodCallStyle(Enum):
+class JsonRpcMethodCallStyle(Enum):
     BOTH = 0
     ARRAY = 1
     OBJECT = 2
 
 
-class TrioJsonRpcMethod(ObjectDescription):
+class JsonRpcMethod(ObjectDescription):
+    """ This directive is used for documenting JSON-RPC methods implemented by copying
+    type annotations and docstrings from a Python handler function. """
+
     required_arguments = 1
-    call_style: TrioJsonRpcMethodCallStyle = TrioJsonRpcMethodCallStyle.BOTH
-    __trio_jsonrpc_method = None
+    call_style: JsonRpcMethodCallStyle = JsonRpcMethodCallStyle.BOTH
+    doc_field_types = [
+        TypedField(
+            "parameter",
+            label="Parameters",
+            names=("param",),  # All names need to be matched by PARAM_RE
+            typerolename="obj",
+            typenames=("paramtype",),
+        ),
+        Field("returnvalue", label="Returns", has_arg=False, names=("returns",)),
+        Field(
+            "returntype",
+            label="Return Type",
+            has_arg=False,
+            names=("rtype",),
+            bodyrolename="class",
+        ),
+        GroupedField("error", label="Errors", names=("error",),),
+    ]
+    __jsonrpc_method = None
+    __inspect_sig = None
+    __type_hints = None
 
     def add_target_and_index(self, name_cls, sig, signode):
-        signode["ids"].append(f"trio-jsonrpc-method-{sig}")
+        """ Create a target ID and add to the domain's list of methods. """
+        signode["ids"].append(f"jsonrpc-method-{sig}")
         if "noindex" not in self.options:
-            trio_jsonrpc = self.env.get_domain("trio-jsonrpc")
-            trio_jsonrpc.add_method(sig)
+            jsonrpc = self.env.get_domain("jsonrpc")
+            jsonrpc.add_method(sig)
 
     def handle_signature(self, sig, signode):
         """ Generate the signature for the JSON-RPC method. """
-        dispatch = load_dispatch(self.env.trio_jsonrpc_dispatch)
-        self.__trio_jsonrpc_method = dispatch.get_handler(self.arguments[0])
-        method_name = self.__trio_jsonrpc_method.__name__
-        isig = signature(self.__trio_jsonrpc_method)
+        dispatch = load_dispatch(self.env.jsonrpc_dispatch)
+        self.__jsonrpc_method = dispatch.get_handler(self.arguments[0])
+        method_name = self.__jsonrpc_method.__name__
+        self.__inspect_sig = signature(self.__jsonrpc_method)
+        self.__type_hints = typing.get_type_hints(self.__jsonrpc_method)
         signode += [
             addnodes.desc_name(text=method_name),
-            self._parse_params(isig),
-            self._parse_return(isig),
+            self._parse_params(),
+            self._parse_return(),
         ]
         return method_name
 
     def before_content(self) -> None:
-        """ Insert docstring from the handler function. """
-        docstr = self.__trio_jsonrpc_method.__doc__
+        """ Insert the docstring from the handler function. Insert any missing types
+        into the docstring. """
+        lines = [""]
+        docstr = self.__jsonrpc_method.__doc__
+        rtype_seen = False
+        param_names = list(self.__type_hints.keys())[:-1]
+
         if docstr:
-            self.content = StringList(prepare_docstring(docstr))
+            lines.extend(prepare_docstring(docstr))
 
-    # def transform_content(self, contentnode: addnodes.desc_content) -> None:
-    #     print("content", type(self.content), repr(self.content))
-    #     for line in prepare_docstring(self.__trio_jsonrpc_method.__doc__):
-    #         contentnode += nodes.Text(line)
-    #     return contentnode
+        # Add type information to any param that missing it
+        for idx in range(len(lines)):
+            line = lines[idx]
+            match = PARAM_RE.match(line)
+            if match:
+                parts = match.group(1).split()
+                param_name = parts[-1]
+                param_names.remove(param_name)
+                if len(parts) == 1:
+                    type_ = self._annotation(self.__type_hints[param_name])
+                    lines[idx] = ":param {} {}:{}".format(
+                        type_, parts[0], match.group(2)
+                    )
+            elif line.startswith(":rtype:"):
+                rtype_seen = True
 
-    def _parse_params(self, isig: Signature) -> addnodes.desc_parameterlist:
+        # Add any missing parameters
+        for param_name in param_names:
+            lines.insert(
+                len(lines) - 1,
+                ":param {} {}:".format(
+                    self._annotation(self.__type_hints[param_name]), param_name
+                ),
+            )
+
+        # Add return type if it's missing.
+        if not rtype_seen:
+            rtype = self._annotation(self.__type_hints["return"])
+            lines.insert(len(lines) - 1, ":rtype: {}".format(rtype))
+        print(lines)
+        self.content += StringList(lines)
+
+    def _parse_params(self) -> addnodes.desc_parameterlist:
+        """ Convert the function's parameter list to a tree. """
         params = addnodes.desc_parameterlist()
         last_kind = None
 
-        for param in isig.parameters.values():
+        for param in self.__inspect_sig.parameters.values():
             if param.kind in (Parameter.KEYWORD_ONLY, Parameter.VAR_KEYWORD):
-                if self.call_style == TrioJsonRpcMethodCallStyle.ARRAY:
+                if self.call_style == JsonRpcMethodCallStyle.ARRAY:
                     raise Exception(
                         "A JSON-RPC method cannot contain both positional-only and "
                         "keyword-only arguments."
                     )
                 else:
-                    self.call_style = TrioJsonRpcMethodCallStyle.OBJECT
+                    self.call_style = JsonRpcMethodCallStyle.OBJECT
 
             if param.kind in (Parameter.POSITIONAL_ONLY, Parameter.VAR_POSITIONAL):
-                if self.call_style == TrioJsonRpcMethodCallStyle.OBJECT:
+                if self.call_style == JsonRpcMethodCallStyle.OBJECT:
                     raise Exception(
                         "A JSON-RPC method cannot contain both positional-only and "
                         "keyword-only arguments."
                     )
                 else:
-                    self.call_style = TrioJsonRpcMethodCallStyle.ARRAY
+                    self.call_style = JsonRpcMethodCallStyle.ARRAY
 
             node = addnodes.desc_parameter()
 
             if param.annotation is not param.empty:
-                print(f"param.annotation {type(param.annotation)}")
-                ann = self._annotation(param.annotation)
+                ann = self._annotation(self.__type_hints[param.name])
                 node += nodes.Text(f"{ann} ")
 
             node += addnodes.desc_sig_name("", param.name)
@@ -140,27 +200,31 @@ class TrioJsonRpcMethod(ObjectDescription):
 
         return params
 
-    def _parse_return(self, isig: Signature) -> addnodes.desc_returns:
-        if isig.return_annotation is not isig.empty:
-            return addnodes.desc_returns(text=self._annotation(isig.return_annotation))
+    def _parse_return(self) -> addnodes.desc_returns:
+        """ Convert the function's return to a node. """
+        if self.__inspect_sig.return_annotation is not self.__inspect_sig.empty:
+            return addnodes.desc_returns(
+                text=self._annotation(self.__type_hints["return"])
+            )
         else:
             return addnodes.desc_returns(text="null")
 
     def _annotation(self, annotation):
-        if isinstance(annotation, str):
+        """ Convert a Python data type into a JSON-ish type name. """
+        try:
             return {
-                "bool": "boolean",
-                "float": "float",
-                "int": "integer",
-                "list": "array",
-                "dict": "object",
-                "str": "string",
+                bool: "boolean",
+                float: "float",
+                int: "integer",
+                list: "array",
+                dict: "object",
+                str: "string",
             }[annotation]
-        else:
-            return "foo"  # raise NotImplementedError()
+        except KeyError:
+            logger.error("Cannot process annotation: %r", annotation)
 
 
-class TrioJsonRpcType(SphinxDirective):
+class JsonRpcType(SphinxDirective):
     has_content = True
 
     def run(self):
@@ -168,7 +232,7 @@ class TrioJsonRpcType(SphinxDirective):
         return [paragraph_node]
 
 
-class TrioJsonRpcIndex(Index):
+class JsonRpcIndex(Index):
     name = "index"
     localname = "JSON-RPC API Index"
     shortname = "Index"
@@ -183,18 +247,18 @@ class TrioJsonRpcIndex(Index):
         return sorted(content.items()), True
 
 
-class TrioJsonRpcDomain(Domain):
-    name = "trio-jsonrpc"
+class JsonRpcDomain(Domain):
+    name = "jsonrpc"
     label = "Trio JSON-RPC"
     roles = {
         "ref": XRefRole(),
     }
     directives = {
-        "dispatch": TrioJsonRpcDispatch,
-        "method": TrioJsonRpcMethod,
+        "dispatch": JsonRpcDispatch,
+        "method": JsonRpcMethod,
     }
     indices = {
-        TrioJsonRpcIndex,
+        JsonRpcIndex,
     }
     initial_data: typing.Dict = {
         "objects": list(),
@@ -227,6 +291,6 @@ class TrioJsonRpcDomain(Domain):
 
 
 def setup(app: Sphinx) -> typing.Dict[str, typing.Any]:
-    app.add_domain(TrioJsonRpcDomain)
+    app.add_domain(JsonRpcDomain)
 
     return {"version": "0.1", "parallel_read_safe": True, "parallel_write_safe": True}

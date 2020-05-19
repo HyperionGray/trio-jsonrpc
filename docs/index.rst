@@ -24,5 +24,5 @@ Contents
 Appendix
 --------
 
-* :ref:`trio-jsonrpc-index`
+* :ref:`jsonrpc-index`
 * :ref:`search`

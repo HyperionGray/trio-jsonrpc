@@ -148,7 +148,7 @@ class JsonRpcConnection:
             except TransportClosed:
                 # If the transport is closed on the receive side, we need to exit the
                 # loop.
-                logger.debug(
+                logger.info(
                     "Background task is exiting because the receive transport is closed."
                 )
                 # We also close our requests channel so that any callers inside

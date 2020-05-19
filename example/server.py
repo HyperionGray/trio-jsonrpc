@@ -38,7 +38,13 @@ class ConnectionContext:
 
 @dispatch.handler
 async def login(user: str, pin: int) -> bool:
-    """ Verify the user's pin and update connection context. """
+    """
+    Verify the user's pin and update connection context.
+
+    :param user: The user to log in as.
+    :param pin: The user's pin number.
+    :returns: True if login succeeds or else false.
+    """
     if user_pins.get(user) == pin:
         dispatch.ctx.user = user
         return True
@@ -48,9 +54,13 @@ async def login(user: str, pin: int) -> bool:
 
 @dispatch.handler
 async def get_balance() -> int:
+    """
+    Get the user's current balance.
+
+    :error JsonRpcAuthorizationError: if not authorized
+    """
     if dispatch.ctx.user is None:
         raise AuthorizationError()
-    print(dispatch.ctx.user)
     return user_balances[dispatch.ctx.user]
 
 
