@@ -1,6 +1,8 @@
 # RTD does not support Poetry natively, so this is a temporary workaround. See:
 # https://github.com/readthedocs/readthedocs.org/issues/4912
-sphinx
+poetry
+sphinx>=3.0
 sphinx-autodoc-typehints
 sphinx-rtd-theme
+sphinxcontrib-trio
 .
