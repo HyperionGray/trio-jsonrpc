@@ -7,6 +7,7 @@ import typing
 import trio
 from trio_jsonrpc import (
     Dispatch,
+    JsonRpcApplicationError,
     JsonRpcConnection,
     JsonRpcConnectionType,
     JsonRpcException,
@@ -45,7 +46,11 @@ async def login(user: str, pin: int) -> bool:
     :param pin: The user's pin number.
     :returns: True if login succeeds or else false.
     """
-    if user_pins.get(user) == pin:
+    try:
+        user_pin = user_pins[user]
+    except KeyError:
+        return False
+    if user_pin == pin:
         dispatch.ctx.user = user
         return True
     else:
@@ -57,11 +62,32 @@ async def get_balance() -> int:
     """
     Get the user's current balance.
 
-    :error JsonRpcAuthorizationError: if not authorized
+    :error AuthorizationError: if not authorized
+    :returns: The current balance.
     """
     if dispatch.ctx.user is None:
         raise AuthorizationError()
     return user_balances[dispatch.ctx.user]
+
+
+@dispatch.handler
+async def transfer(*, to: str, amount: int) -> None:
+    """
+    Transfer some money to another user.
+
+    :param to: The name of the user to transfer money to.
+    :param amount: The amount of money to transfer.
+    :error AuthorizationError: if not authorized
+    :error InsufficientFundsError: if not authorized
+    """
+    from_ = dispatch.ctx.user
+    if from_ is None:
+        raise AuthorizationError()
+    if user_balances[from_] < amount:
+        raise InsufficientFundsError()
+    user_balances[to] += amount
+    user_balances[from_] -= amount
+    return True
 
 
 async def run_server(port):

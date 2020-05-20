@@ -11,8 +11,16 @@ logger = logging.getLogger("client")
 
 
 async def get_balance(client, args):
-    result = await client.request("get_balance", [args.username, args.pin])
+    result = await client.request("get_balance", [])
     logger.info("Current balance: %d", result)
+
+
+async def transfer(client, args):
+    result = await client.request("get_balance", [])
+    logger.info("Current balance: %d", result)
+    await client.request("transfer", [args.dest_account, args.amount])
+    result = await client.request("get_balance", [])
+    logger.info("New balance: %d", result)
 
 
 async def main(args):
@@ -51,6 +59,11 @@ if __name__ == "__main__":
     subparsers.add_parser("get_balance", help="Display current balance").set_defaults(
         func=get_balance
     )
+
+    xfr = subparsers.add_parser("transfer", help="Display current balance")
+    xfr.add_argument("dest_account", help="The name of the account to transfer into")
+    xfr.add_argument("amount", type=int, help="The amount to transfer")
+    xfr.set_defaults(func=transfer)
 
     args = parser.parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper()))

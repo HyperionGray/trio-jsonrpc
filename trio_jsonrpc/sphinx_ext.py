@@ -1,6 +1,9 @@
 # type: ignore
 """
 This module defines a Sphinx extension for Trio JSON-RPC methods and objects.
+
+It is highly experimental and is excluded from MyPy linting, unit tests, and code
+coverage.
 """
 from __future__ import annotations
 from collections import defaultdict
@@ -20,6 +23,7 @@ from sphinx.roles import XRefRole
 from sphinx.util.docfields import Field, GroupedField, TypedField
 from sphinx.util.docstrings import prepare_docstring
 from sphinx.util.docutils import nodes, switch_source_input
+from sphinx.util.nodes import make_refnode
 
 if typing.TYPE_CHECKING:
     from sphinx.application import Sphinx
@@ -28,6 +32,16 @@ if typing.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 PARAM_RE = re.compile(r":param ([^:]+):(.*)")
+PYTHON_TO_JSON_TYPE = {
+    bool: "boolean",
+    float: "float",
+    int: "integer",
+    list: "array",
+    dict: "object",
+    str: "string",
+    type(None): "null",
+}
+JSON_TYPES = set(PYTHON_TO_JSON_TYPE.values())
 
 
 def load_dispatch(location: str) -> Dispatch:
@@ -68,14 +82,27 @@ class JsonRpcMethodCallStyle(Enum):
     ARRAY = 1
     OBJECT = 2
 
+    def description(self):
+        return {
+            JsonRpcMethodCallStyle.ARRAY: "Arguments must be passed as an array.",
+            JsonRpcMethodCallStyle.OBJECT: "Arguments must be passed as an object.",
+            JsonRpcMethodCallStyle.BOTH: "Arguments may be passed as an array or object.",
+        }[self]
+
 
 class JsonRpcMethod(ObjectDescription):
-    """ This directive is used for documenting JSON-RPC methods implemented by copying
-    type annotations and docstrings from a Python handler function. """
+    """
+    This directive is used for documenting JSON-RPC methods.
+
+    It copies type annotations and docstrings from a Python handler function.
+    """
 
     required_arguments = 1
     call_style: JsonRpcMethodCallStyle = JsonRpcMethodCallStyle.BOTH
     doc_field_types = [
+        Field(
+            "paramstyle", label="Parameter Style", has_arg=False, names=("paramstyle",)
+        ),
         TypedField(
             "parameter",
             label="Parameters",
@@ -91,7 +118,7 @@ class JsonRpcMethod(ObjectDescription):
             names=("rtype",),
             bodyrolename="class",
         ),
-        GroupedField("error", label="Errors", names=("error",),),
+        GroupedField("error", label="Errors", names=("error",), rolename="exception"),
     ]
     __jsonrpc_method = None
     __inspect_sig = None
@@ -125,6 +152,7 @@ class JsonRpcMethod(ObjectDescription):
         docstr = self.__jsonrpc_method.__doc__
         rtype_seen = False
         param_names = list(self.__type_hints.keys())[:-1]
+        param_start = None
 
         if docstr:
             lines.extend(prepare_docstring(docstr))
@@ -134,6 +162,8 @@ class JsonRpcMethod(ObjectDescription):
             line = lines[idx]
             match = PARAM_RE.match(line)
             if match:
+                if param_start is None:
+                    param_start = idx
                 parts = match.group(1).split()
                 param_name = parts[-1]
                 param_names.remove(param_name)
@@ -154,11 +184,17 @@ class JsonRpcMethod(ObjectDescription):
                 ),
             )
 
+        # Insert the argument style
+        if param_start is not None:
+            lines.insert(
+                param_start, ":paramstyle: {}".format(self.call_style.description())
+            )
+
         # Add return type if it's missing.
         if not rtype_seen:
             rtype = self._annotation(self.__type_hints["return"])
             lines.insert(len(lines) - 1, ":rtype: {}".format(rtype))
-        print(lines)
+
         self.content += StringList(lines)
 
     def _parse_params(self) -> addnodes.desc_parameterlist:
@@ -212,14 +248,7 @@ class JsonRpcMethod(ObjectDescription):
     def _annotation(self, annotation):
         """ Convert a Python data type into a JSON-ish type name. """
         try:
-            return {
-                bool: "boolean",
-                float: "float",
-                int: "integer",
-                list: "array",
-                dict: "object",
-                str: "string",
-            }[annotation]
+            return PYTHON_TO_JSON_TYPE[annotation]
         except KeyError:
             logger.error("Cannot process annotation: %r", annotation)
 
@@ -232,6 +261,54 @@ class JsonRpcType(SphinxDirective):
         return [paragraph_node]
 
 
+class JsonRpcError(ObjectDescription):
+    """ This directive is used for documenting JSON-RPC errors. """
+
+    required_arguments = 1
+    call_style: JsonRpcMethodCallStyle = JsonRpcMethodCallStyle.BOTH
+    doc_field_types = [
+        Field("code", label="Error Code", has_arg=False, names=("error-code",),),
+        Field(
+            "message", label="Error Message", has_arg=True, names=("error-message",),
+        ),
+    ]
+    __class = None
+
+    def add_target_and_index(self, name_cls, sig, signode):
+        """ Create a target ID and add to the domain's list of errors. """
+        class_name = sig.split(".")[-1]
+        signode["ids"].append(f"jsonrpc-error-{class_name}")
+        if "noindex" not in self.options:
+            jsonrpc = self.env.get_domain("jsonrpc")
+            jsonrpc.add_error(sig)
+
+    def handle_signature(self, sig, signode):
+        """ Generate the signature for the JSON-RPC method. """
+        error_name = self.arguments[0]
+        *module_parts, class_name = sig.split(".")
+        module_name = ".".join(module_parts)
+        module = import_module(module_name)
+        self.__class = getattr(module, class_name)
+        signode += [addnodes.desc_name(text=error_name)]
+        return class_name
+
+    def before_content(self) -> None:
+        """
+        Insert the docstring from the error class. Add the error code and message.
+        """
+        lines = [""]
+        docstr = self.__class.__doc__
+
+        if docstr:
+            lines.extend(prepare_docstring(docstr))
+
+        # Add error code and message.
+        lines.insert(len(lines) - 1, "")
+        lines.insert(len(lines) - 1, ":code: {}".format(self.__class.ERROR_CODE))
+        lines.insert(len(lines) - 1, ":message: {}".format(self.__class.ERROR_MESSAGE))
+        self.content += StringList(lines)
+
+
 class JsonRpcIndex(Index):
     name = "index"
     localname = "JSON-RPC API Index"
@@ -239,8 +316,7 @@ class JsonRpcIndex(Index):
 
     def generate(self, docnames=None):
         content = defaultdict(list)
-        methods = sorted(self.domain.get_objects(), key=lambda m: m[0])
-        for name, dispname, typ, docname, anchor, _ in methods:
+        for name, dispname, typ, docname, anchor, _ in self.domain.get_objects():
             content[dispname[0].lower()].append(
                 (dispname, 0, docname, anchor, docname, "", typ)
             )
@@ -256,26 +332,48 @@ class JsonRpcDomain(Domain):
     directives = {
         "dispatch": JsonRpcDispatch,
         "method": JsonRpcMethod,
+        "exception": JsonRpcError,
     }
     indices = {
         JsonRpcIndex,
     }
     initial_data: typing.Dict = {
-        "objects": list(),
+        "errors": dict(),
+        "methods": dict(),
     }
+
+    def add_error(self, signature):
+        class_name = signature.split(".")[-1]
+        name = f"error.{class_name}"
+        anchor = f"jsonrpc-error-{class_name}"
+        self.data["errors"][name] = (
+            class_name,
+            "Error",
+            self.env.docname,
+            anchor,
+            0,
+        )
 
     def add_method(self, signature):
         name = f"method.{signature}"
-        anchor = f"method-{signature}"
-        self.data["objects"].append(
-            (name, signature, "Method", self.env.docname, anchor, 0)
+        anchor = f"jsonrpc-method-{signature}"
+        self.data["methods"][name] = (
+            signature,
+            "Method",
+            self.env.docname,
+            anchor,
+            0,
         )
 
     def get_objects(self):
-        for meth in self.data["objects"]:
-            yield meth
+        for name, err in self.data["errors"].items():
+            yield (name, *err)
+        for name, meth in self.data["methods"].items():
+            yield (name, *meth)
 
-    def resolve_xref(self, env, fromdocname, builder, typ, target, node, countnode):
+    def resolve_xref(self, env, fromdocname, builder, typ, target, node, contnode):
+        if target in JSON_TYPES:
+            return
         match = [
             (docname, anchor)
             for name, sig, typ, docname, anchor, prio in self.get_objects()
@@ -286,7 +384,7 @@ class JsonRpcDomain(Domain):
             targ = match[0][1]
             return make_refnode(builder, fromdocname, todocname, targ, contnode, targ)
         else:
-            logger.error("Cannot resolve xref: %s", target)
+            logger.error('JSON-RPC: Cannot resolve xref "%s"', target)
             return
 
 

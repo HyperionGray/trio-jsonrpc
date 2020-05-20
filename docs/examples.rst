@@ -20,6 +20,8 @@ run:
 
 This starts the server on localhost port 8080.
 
+.. _client-example:
+
 Client Example
 --------------
 
