@@ -27,7 +27,7 @@ The following example shows a basic JSON-RPC client.
 
 The example begins by opening a JSON-RPC connection using a WebSocket transport.
 
-..note::
+.. note::
 
     The implementation is designed to support multiple types of transport, but currently
     WebSocket transport is the only one that has been implemented.

@@ -87,7 +87,6 @@ async def transfer(*, to: str, amount: int) -> None:
         raise InsufficientFundsError()
     user_balances[to] += amount
     user_balances[from_] -= amount
-    return True
 
 
 async def run_server(port):

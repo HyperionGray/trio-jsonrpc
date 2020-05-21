@@ -18,7 +18,7 @@ async def get_balance(client, args):
 async def transfer(client, args):
     result = await client.request("get_balance", [])
     logger.info("Current balance: %d", result)
-    await client.request("transfer", [args.dest_account, args.amount])
+    await client.request("transfer", {"to": args.dest_account, "amount": args.amount})
     result = await client.request("get_balance", [])
     logger.info("New balance: %d", result)
 
