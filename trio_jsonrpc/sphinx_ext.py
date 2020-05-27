@@ -283,7 +283,7 @@ class JsonRpcError(ObjectDescription):
             jsonrpc.add_error(sig)
 
     def handle_signature(self, sig, signode):
-        """ Generate the signature for the JSON-RPC method. """
+        """ Generate the signature for the JSON-RPC error. """
         error_name = self.arguments[0]
         *module_parts, class_name = sig.split(".")
         module_name = ".".join(module_parts)

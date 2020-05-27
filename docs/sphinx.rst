@@ -117,11 +117,6 @@ arguments.
 You can reference a JSON-RPC method inside text a directive like ``:jsonrpc:ref:`login```,
 which renders as a hyperlink: :jsonrpc:ref:`login`.
 
-Objects
--------
-
-TBD
-
 Errors
 ------
 
