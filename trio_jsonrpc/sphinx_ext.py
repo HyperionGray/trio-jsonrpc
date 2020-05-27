@@ -157,6 +157,8 @@ class JsonRpcMethod(ObjectDescription):
         if docstr:
             lines.extend(prepare_docstring(docstr))
 
+        lines.insert(len(lines) - 1, "")
+
         # Add type information to any param that missing it
         for idx in range(len(lines)):
             line = lines[idx]
@@ -166,12 +168,19 @@ class JsonRpcMethod(ObjectDescription):
                     param_start = idx
                 parts = match.group(1).split()
                 param_name = parts[-1]
-                param_names.remove(param_name)
+                try:
+                    param_names.remove(param_name)
+                except ValueError:
+                    # The docstring declares a parameter that is not type hinted. Just
+                    # ignore it.
+                    pass
                 if len(parts) == 1:
-                    type_ = self._annotation(self.__type_hints[param_name])
-                    lines[idx] = ":param {} {}:{}".format(
-                        type_, parts[0], match.group(2)
-                    )
+                    th = self.__type_hints.get(param_name)
+                    if th:
+                        type_ = self._annotation(th)
+                        lines[idx] = ":param {} {}:{}".format(
+                            type_, parts[0], match.group(2)
+                        )
             elif line.startswith(":rtype:"):
                 rtype_seen = True
 
@@ -192,8 +201,11 @@ class JsonRpcMethod(ObjectDescription):
 
         # Add return type if it's missing.
         if not rtype_seen:
-            rtype = self._annotation(self.__type_hints["return"])
-            lines.insert(len(lines) - 1, ":rtype: {}".format(rtype))
+            th = self.__type_hints.get("return")
+            if th:
+                rtype = self._annotation(th)
+                lines.insert(len(lines) - 1, "")
+                lines.insert(len(lines) - 1, ":rtype: {}".format(rtype))
 
         self.content += StringList(lines)
 
@@ -203,7 +215,10 @@ class JsonRpcMethod(ObjectDescription):
         last_kind = None
 
         for param in self.__inspect_sig.parameters.values():
-            if param.kind in (Parameter.KEYWORD_ONLY, Parameter.VAR_KEYWORD):
+            if (
+                param.kind in (Parameter.KEYWORD_ONLY, Parameter.VAR_KEYWORD)
+                or param.default is Parameter.empty
+            ):
                 if self.call_style == JsonRpcMethodCallStyle.ARRAY:
                     raise Exception(
                         "A JSON-RPC method cannot contain both positional-only and "
@@ -223,14 +238,14 @@ class JsonRpcMethod(ObjectDescription):
 
             node = addnodes.desc_parameter()
 
-            if param.annotation is not param.empty:
-                ann = self._annotation(self.__type_hints[param.name])
-                node += nodes.Text(f"{ann} ")
-
             node += addnodes.desc_sig_name("", param.name)
 
+            if param.annotation is not param.empty:
+                ann = self._annotation(self.__type_hints[param.name])
+                node += nodes.Text(f": {ann}")
+
             if param.default is not param.empty:
-                node += nodes.Text(f" [default {param.default}]")
+                node += nodes.Text(f" [default={param.default}]")
 
             params += node
 
@@ -250,7 +265,26 @@ class JsonRpcMethod(ObjectDescription):
         try:
             return PYTHON_TO_JSON_TYPE[annotation]
         except KeyError:
-            logger.error("Cannot process annotation: %r", annotation)
+            pass
+
+        if isinstance(annotation, type):
+            # Handle class references
+            return "{}.{}".format(annotation.__module__, annotation.__name__)
+        elif hasattr(annotation, "_name"):
+            # Handle the special typing.* types
+            if annotation._name == "List":
+                return "array of " + self._annotation(annotation.__args__[0])
+            elif annotation._name == "Dict":
+                return "object"
+            elif (
+                annotation._name is None
+                and annotation._inst
+                and annotation.__args__[1] is type(None)
+            ):
+                return "{} [optional]".format(self._annotation(annotation.__args__[0]))
+
+        logger.error("Cannot process annotation: %r", annotation)
+        return "unknown"
 
 
 class JsonRpcType(SphinxDirective):
@@ -384,8 +418,9 @@ class JsonRpcDomain(Domain):
             targ = match[0][1]
             return make_refnode(builder, fromdocname, todocname, targ, contnode, targ)
         else:
-            logger.error('JSON-RPC: Cannot resolve xref "%s"', target)
-            return
+            return env.get_domain("py").resolve_xref(
+                env, fromdocname, builder, typ, target, node, contnode
+            )
 
 
 def setup(app: Sphinx) -> typing.Dict[str, typing.Any]:
