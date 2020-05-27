@@ -19,6 +19,7 @@ Contents
    errors
    examples
    sphinx
+   changelog
 
 
 Appendix
