@@ -114,8 +114,91 @@ allow for mixing positional and keyword arguments in a single method call. By ex
 it is invalid to declare a JSON-RPC method with both positional-only and keyword-only
 arguments.
 
-You can reference a JSON-RPC method inside text a directive like ``:jsonrpc:ref:`login```,
-which renders as a hyperlink: :jsonrpc:ref:`login`.
+You can reference a JSON-RPC method inside with a directive like
+``:jsonrpc:ref:`login```, which renders as a hyperlink: :jsonrpc:ref:`login`.
+
+Objects
+-------
+
+If your method signature uses only primitive types, then the method signature will be
+documented for you. But if the method signature includes any object types, then Sphinx
+doesn't automatically know the correspondence between the JSON request and that Python
+object. One option is to to document the object structure inside the method's docstring,
+but this might be limiting if you have types that are used in multiple places. This
+section describes how to document objects like this. Let's start with a motivating
+example.
+
+First, we have a data model that we want to use in several places throughout the API.
+
+.. code:: python3
+
+    @dataclass
+    class AccountInfo:
+        number: int
+        name: str
+        address: str
+
+This class stores some basic information about an account. Next, we have a method
+signature that returns this information for the current user.
+
+.. code:: python3
+
+    @dispatch.handler
+    async def get_account_info() -> AccountInfoJson:
+        ...
+
+We could just return a ``dict`` from this method, but that would require us to write
+documentation for all of the possible keys and values in the returned object. It would
+also be limiting if we wanted to include the same account info structure in other
+methods.
+
+Instead, we introduce a new class called ``AccountInfoJson``.
+
+.. code:: python3
+
+    class AccountInfoJson(dict):
+        @classmethod
+        def from_json(self, number: int, name: str, address: str) -> AccountInfo:
+            return AccountInfo(number, name, address)
+
+        @classmethod
+        def to_json(self, account_info: AccountInfo) -> AccountInfoJson:
+            return AccountInfoJson(
+                number=account_info.number,
+                name=account_info.name,
+                address=account_info.address,
+            )
+
+The purpose of this class is to convert from ``AccountInfo`` to a JSON dictionary and
+back. It subclasses ``dict`` and adds two class methods for the JSON conversion. To make
+this clearer, let's look at the implementation of our account info method.
+
+.. code:: python3
+
+    @dispatch.handler
+    async def get_account_info() -> AccountInfoJson:
+        """
+        Get the account information for the current user..
+
+        :error AuthorizationError: if not authorized
+        """
+        if dispatch.ctx.user is None:
+            raise AuthorizationError()
+        return AccountInfoJson.to_json(user_info[dispatch.ctx.user])
+
+The method looks up an existing ``AccountInfo`` object and then passes that into
+``AccountInfoJson.to_json(...)`` to convert it into a JSON dictionary. Why go to all of
+this trouble? Because now instead of simply returning ``dict``, the method now returns a
+specific type, and the type checker and Python interpreter will still be happy that the
+return type is a suitable JSON dictionary.
+
+We can now use a Sphinx directive to document what ``AccountInfoJson`` is:
+
+.. code::
+
+    .. jsonrpc:model:: example.server.AccountInfoJson
+
+.. jsonrpc:model:: example.server.AccountInfoJson
 
 Errors
 ------

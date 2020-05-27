@@ -23,6 +23,13 @@ async def transfer(client, args):
     logger.info("New balance: %d", result)
 
 
+async def get_account_info(client, args):
+    info = await client.request("get_account_info", [])
+    logger.info("Acct: %d", info["number"])
+    logger.info("Name: %s", info["name"])
+    logger.info("Addr: %s", info["address"])
+
+
 async def main(args):
     """ The client's main entry point. """
     async with open_jsonrpc_ws(args.server) as client:
@@ -56,6 +63,9 @@ if __name__ == "__main__":
         title="commands", dest="subcommand", required=True
     )
 
+    subparsers.add_parser("get_account_info", help="Display account info").set_defaults(
+        func=get_account_info
+    )
     subparsers.add_parser("get_balance", help="Display current balance").set_defaults(
         func=get_balance
     )

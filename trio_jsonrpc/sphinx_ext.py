@@ -253,12 +253,158 @@ class JsonRpcMethod(ObjectDescription):
             logger.error("Cannot process annotation: %r", annotation)
 
 
-class JsonRpcType(SphinxDirective):
-    has_content = True
+class JsonRpcModel(ObjectDescription):
+    """
+    This directive is used for documenting JSON-RPC models.
+    """
 
-    def run(self):
-        paragraph_node = nodes.paragraph(text=f"Hello type {self.content}")
-        return [paragraph_node]
+    required_arguments = 1
+    doc_field_types = [
+        Field(
+            "paramstyle", label="Parameter Style", has_arg=False, names=("paramstyle",)
+        ),
+        TypedField(
+            "parameter",
+            label="Parameters",
+            names=("param",),  # All names need to be matched by PARAM_RE
+            typerolename="obj",
+            typenames=("paramtype",),
+        ),
+        Field("returnvalue", label="Returns", has_arg=False, names=("returns",)),
+        Field(
+            "returntype",
+            label="Return Type",
+            has_arg=False,
+            names=("rtype",),
+            bodyrolename="class",
+        ),
+        GroupedField("error", label="Errors", names=("error",), rolename="exception"),
+    ]
+    __jsonrpc_model = None
+    __inspect_sig = None
+    __type_hints = None
+
+    def add_target_and_index(self, name_cls, sig, signode):
+        """ Create a target ID and add to the domain's list of models. """
+        signode["ids"].append(f"jsonrpc-model-{sig}")
+        if "noindex" not in self.options:
+            jsonrpc = self.env.get_domain("jsonrpc")
+            jsonrpc.add_model(sig)
+
+    def handle_signature(self, sig, signode):
+        """ Generate the signature for the JSON-RPC model. """
+        model_name = self.arguments[0]
+        *module_parts, class_name = sig.split(".")
+        module_name = ".".join(module_parts)
+        module = import_module(module_name)
+        self.__class = getattr(module, class_name)
+        signode += [addnodes.desc_name(text=model_name)]
+        return class_name
+
+    def before_content(self) -> None:
+        lines = [""]
+        docstr = self.__jsonrpc_model.__doc__
+        rtype_seen = False
+        param_names = []  # TODO list(self.__type_hints.keys())[:-1]
+        param_start = None
+
+        if docstr:
+            lines.extend(prepare_docstring(docstr))
+
+        # Add type information to any param that missing it
+        for idx in range(len(lines)):
+            line = lines[idx]
+            match = PARAM_RE.match(line)
+            if match:
+                if param_start is None:
+                    param_start = idx
+                parts = match.group(1).split()
+                param_name = parts[-1]
+                param_names.remove(param_name)
+                if len(parts) == 1:
+                    type_ = self._annotation(self.__type_hints[param_name])
+                    lines[idx] = ":param {} {}:{}".format(
+                        type_, parts[0], match.group(2)
+                    )
+            elif line.startswith(":rtype:"):
+                rtype_seen = True
+
+        # Add any missing parameters
+        for param_name in param_names:
+            lines.insert(
+                len(lines) - 1,
+                ":param {} {}:".format(
+                    self._annotation(self.__type_hints[param_name]), param_name
+                ),
+            )
+
+        # Insert the argument style
+        if param_start is not None:
+            lines.insert(
+                param_start, ":paramstyle: {}".format(self.call_style.description())
+            )
+
+        # Add return type if it's missing.
+        if not rtype_seen:
+            rtype = "foo"  # self._annotation(self.__type_hints["return"])
+            lines.insert(len(lines) - 1, ":rtype: {}".format(rtype))
+
+        self.content += StringList(lines)
+
+    def _parse_params(self) -> addnodes.desc_parameterlist:
+        """ Convert the function's parameter list to a tree. """
+        params = addnodes.desc_parameterlist()
+        last_kind = None
+
+        for param in self.__inspect_sig.parameters.values():
+            if param.kind in (Parameter.KEYWORD_ONLY, Parameter.VAR_KEYWORD):
+                if self.call_style == JsonRpcMethodCallStyle.ARRAY:
+                    raise Exception(
+                        "A JSON-RPC method cannot contain both positional-only and "
+                        "keyword-only arguments."
+                    )
+                else:
+                    self.call_style = JsonRpcMethodCallStyle.OBJECT
+
+            if param.kind in (Parameter.POSITIONAL_ONLY, Parameter.VAR_POSITIONAL):
+                if self.call_style == JsonRpcMethodCallStyle.OBJECT:
+                    raise Exception(
+                        "A JSON-RPC method cannot contain both positional-only and "
+                        "keyword-only arguments."
+                    )
+                else:
+                    self.call_style = JsonRpcMethodCallStyle.ARRAY
+
+            node = addnodes.desc_parameter()
+
+            if param.annotation is not param.empty:
+                ann = self._annotation(self.__type_hints[param.name])
+                node += nodes.Text(f"{ann} ")
+
+            node += addnodes.desc_sig_name("", param.name)
+
+            if param.default is not param.empty:
+                node += nodes.Text(f" [default {param.default}]")
+
+            params += node
+
+        return params
+
+    def _parse_return(self) -> addnodes.desc_returns:
+        """ Convert the function's return to a node. """
+        if self.__inspect_sig.return_annotation is not self.__inspect_sig.empty:
+            return addnodes.desc_returns(
+                text=self._annotation(self.__type_hints["return"])
+            )
+        else:
+            return addnodes.desc_returns(text="null")
+
+    def _annotation(self, annotation):
+        """ Convert a Python data type into a JSON-ish type name. """
+        try:
+            return PYTHON_TO_JSON_TYPE[annotation]
+        except KeyError:
+            logger.error("Cannot process annotation: %r", annotation)
 
 
 class JsonRpcError(ObjectDescription):
@@ -332,6 +478,7 @@ class JsonRpcDomain(Domain):
     directives = {
         "dispatch": JsonRpcDispatch,
         "method": JsonRpcMethod,
+        "model": JsonRpcModel,
         "exception": JsonRpcError,
     }
     indices = {
@@ -340,6 +487,7 @@ class JsonRpcDomain(Domain):
     initial_data: typing.Dict = {
         "errors": dict(),
         "methods": dict(),
+        "models": dict(),
     }
 
     def add_error(self, signature):
@@ -365,11 +513,24 @@ class JsonRpcDomain(Domain):
             0,
         )
 
+    def add_model(self, signature):
+        name = f"model.{signature}"
+        anchor = f"jsonrpc-model-{signature}"
+        self.data["models"][name] = (
+            signature,
+            "Model",
+            self.env.docname,
+            anchor,
+            0,
+        )
+
     def get_objects(self):
         for name, err in self.data["errors"].items():
             yield (name, *err)
         for name, meth in self.data["methods"].items():
             yield (name, *meth)
+        for name, model in self.data["models"].items():
+            yield (name, *model)
 
     def resolve_xref(self, env, fromdocname, builder, typ, target, node, contnode):
         if target in JSON_TYPES:

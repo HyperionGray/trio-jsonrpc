@@ -90,6 +90,62 @@ async def transfer(*, to: str, amount: int) -> None:
     user_balances[from_] -= amount
 
 
+@dataclass
+class AccountInfo:
+    number: int
+    name: str
+    address: str
+
+
+user_info = {
+    "john": AccountInfo(number=28191721, name="John Doe", address="123 Fake St"),
+    "jane": AccountInfo(number=89716162, name="Jane Doe", address="1600 Penn Ave"),
+}
+
+
+class AccountInfoJson(dict):
+    """
+    Stores basic information about an account.
+    """
+
+    @classmethod
+    def from_json(self, number: int, name: str, address: str) -> AccountInfo:
+        return AccountInfo(number, name, address)
+
+    @classmethod
+    def to_json(self, account_info: AccountInfo) -> AccountInfoJson:
+        return AccountInfoJson(
+            number=account_info.number,
+            name=account_info.name,
+            address=account_info.address,
+        )
+
+
+@dispatch.handler
+async def get_account_info() -> AccountInfoJson:
+    """
+    Get the account information for the current user..
+
+    :error AuthorizationError: if not authorized
+    """
+    if dispatch.ctx.user is None:
+        raise AuthorizationError()
+    return AccountInfoJson.to_json(user_info[dispatch.ctx.user])
+
+
+@dispatch.handler
+async def set_account_info(account_info: AccountInfoJson) -> None:
+    """
+    Set the account information for the current user..
+
+    :param account_info: The name of the user to transfer money to.
+    :error AuthorizationError: if not authorized
+    """
+    if dispatch.ctx.user is None:
+        raise AuthorizationError()
+    user_info[dispatch.ctx.user] = AccountInfoJson.from_json(**account_info)
+
+
 async def run_server(port):
     """ The main entry point for the server. """
     base_context = ConnectionContext()

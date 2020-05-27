@@ -14,7 +14,7 @@ classifiers = [
 
 [tool.poetry.dependencies]
 python = "^3.7"
-sansio-jsonrpc = "^0.2.0"
+sansio-jsonrpc = {path = "../sansio-jsonrpc"}
 trio-websocket = "^0.8.0"
 
 [tool.poetry.dev-dependencies]
