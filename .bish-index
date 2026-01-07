@@ -1,0 +1,17 @@
+./trio_jsonrpc/__init__.py
+./trio_jsonrpc/main.py
+./trio_jsonrpc/dispatch.py
+./trio_jsonrpc/sphinx_ext.py
+./AGENTS.md
+./example/shared.py
+./example/__init__.py
+./example/server.py
+./example/client.py
+./README.md
+./LICENSE.md
+./tests/test_main.py
+./tests/test_dispatch.py
+./tests/__init__.py
+./tests/test_ws.py
+./tests/test_memory.py
+./docs/conf.py
